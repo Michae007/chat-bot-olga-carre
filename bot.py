@@ -12,14 +12,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Определение состояний разговора
-SERVICE, DATE, TIME, NAME, PHONE = range(5)
+# ОТЛАДКА: Выводим все переменные окружения (без значений для безопасности)
+logger.info("=== BOT STARTING ===")
+logger.info(f"Available env vars: {[k for k in os.environ.keys() if 'BOT' in k or 'TOKEN' in k]}")
 
 # Получаем токен из переменных окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
+# Если не нашли, попробуем альтернативные имена
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is not set")
+    BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    logger.info("Tried TELEGRAM_BOT_TOKEN")
+
+if not BOT_TOKEN:
+    BOT_TOKEN = os.environ.get('TOKEN')
+    logger.info("Tried TOKEN")
+
+if not BOT_TOKEN:
+    # Выводим отладочную информацию
+    logger.error("=== BOT_TOKEN NOT FOUND ===")
+    logger.error("Available environment variables:")
+    for key in sorted(os.environ.keys()):
+        if any(term in key.upper() for term in ['BOT', 'TOKEN', 'KEY', 'SECRET']):
+            logger.error(f"  {key} = ***HIDDEN***")
+        else:
+            logger.error(f"  {key} = {os.environ[key]}")
+    
+    # Вместо падения - ждем ручного установления переменной
+    logger.error("Please set BOT_TOKEN environment variable in Railway!")
+    logger.error("Waiting for variable to be set...")
+    
+    # Можно временно закомментировать эту строку для теста:
+    raise ValueError("BOT_TOKEN environment variable is not set. Please set it in Railway Variables section.")
+
+logger.info("✅ Bot token loaded successfully!")
+
+# Определение состояний разговора
+SERVICE, DATE, TIME, NAME, PHONE = range(5)
 
 # Инициализация базы данных
 def init_db():
@@ -41,8 +70,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Добро пожаловать в бот для записи на прием!\n\n"
         "📅 Для записи на прием введите /book\n"
-        "📋 Для просмотра ваших записей введите /my_bookings\n"
-        "❌ Для отмены записи введите /cancel_booking"
+        "📋 Для просмотра ваших записей введите /my_bookings"
     )
 
 # Начало процесса записи
@@ -158,26 +186,6 @@ async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text)
 
-# Отмена записи
-async def cancel_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ Укажите ID записи для отмены:\n/cancel_booking 1")
-        return
-    
-    try:
-        booking_id = int(args[0])
-        conn = sqlite3.connect('appointments.db')
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM appointments WHERE id = ?", (booking_id,))
-        conn.commit()
-        conn.close()
-        
-        await update.message.reply_text(f"✅ Запись #{booking_id} успешно отменена!")
-        
-    except (ValueError, sqlite3.Error):
-        await update.message.reply_text("❌ Ошибка при отмене записи. Проверьте ID.")
-
 # Отмена диалога
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('❌ Запись отменена', reply_markup=ReplyKeyboardRemove())
@@ -191,8 +199,13 @@ def main():
     # Инициализация базы данных
     init_db()
     
+    logger.info("✅ Database initialized")
+    logger.info("✅ Creating bot application...")
+    
     # Создание приложения
     application = Application.builder().token(BOT_TOKEN).build()
+    
+    logger.info("✅ Bot application created")
     
     # Обработчик диалога записи
     conv_handler = ConversationHandler(
@@ -210,9 +223,11 @@ def main():
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("my_bookings", my_bookings))
-    application.add_handler(CommandHandler("cancel_booking", cancel_booking))
     application.add_handler(conv_handler)
     application.add_error_handler(error)
+    
+    logger.info("✅ Handlers registered")
+    logger.info("✅ Starting bot polling...")
     
     # Запуск бота
     application.run_polling()
