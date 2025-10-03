@@ -123,10 +123,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
 
-# Обработка callback queries для главного меню - УЛУЧШЕННАЯ ВЕРСИЯ
+# Обработка callback queries для главного меню
 async def handle_main_menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
+    else:
+        return
     
     logger.info(f"Обработка callback: {query.data}")
     
@@ -145,14 +148,20 @@ async def handle_main_menu_callbacks(update: Update, context: ContextTypes.DEFAU
             await leave_review_callback(update, context)
     except Exception as e:
         logger.error(f"Ошибка в обработчике callback: {e}")
-        await query.edit_message_text("❌ Произошла ошибка. Попробуйте еще раз.")
+        if query:
+            await query.edit_message_text("❌ Произошла ошибка. Попробуйте еще раз.")
 
-# Обработчик быстрой записи - ПРОСТОЙ И РАБОЧИЙ
+# Обработчик быстрой записи - ИСПРАВЛЕННАЯ ВЕРСИЯ
 async def quick_book_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    # Проверяем, это callback query или обычное сообщение
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        message = query.message
+    else:
+        message = update.message
     
-    logger.info("Начало процесса записи через кнопку")
+    logger.info("Начало процесса записи")
     
     # Создаем клавиатуру с услугами
     keyboard = []
@@ -163,11 +172,18 @@ async def quick_book_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_booking")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await query.edit_message_text(
-        "✨ <b>Выберите услугу:</b>",
-        reply_markup=reply_markup,
-        parse_mode='HTML'
-    )
+    text = "✨ <b>Выберите услугу:</b>"
+    
+    if update.callback_query:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    return SERVICE
+
+# Команда /book - ИСПРАВЛЕННАЯ ВЕРСИЯ
+async def book_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await quick_book_handler(update, context)
 
 # Обработка выбора услуги
 async def service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -215,6 +231,7 @@ async def service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
+    return DATE
 
 # Обработка выбора даты
 async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,6 +275,7 @@ async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
+    return TIME
 
 # Обработка выбора времени
 async def time_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,6 +327,7 @@ async def time_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>Как к вам обращаться?</i>",
         parse_mode='HTML'
     )
+    return NAME
 
 # Ввод имени
 async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -318,6 +337,7 @@ async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>Пример: +79123456789 или 89123456789</i>",
         parse_mode='HTML'
     )
+    return PHONE
 
 # Ввод телефона
 async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -704,7 +724,7 @@ async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"   🕒 <b>Время:</b> {app[3]}\n"
                 f"   📊 <b>Статус:</b> {status_text}\n\n")
     
-    text += "💡 <b>Для отмены записи:</b>\n<code>/cancel_booking ID_записи</code>"
+    text += "💡 <b>Для отменя записи:</b>\n<code>/cancel_booking ID_записи</code>"
     
     await update.message.reply_text(text, parse_mode='HTML')
 
@@ -854,7 +874,7 @@ def main():
     # Обработчик диалога записи через ConversationHandler
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler('book', quick_book_handler),
+            CommandHandler('book', book_command),
             CallbackQueryHandler(quick_book_handler, pattern='^quick_book$')
         ],
         states={
@@ -877,7 +897,8 @@ def main():
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(cancel, pattern='^cancel_booking$'),
             CallbackQueryHandler(cancel, pattern='^confirm_no$')
-        ]
+        ],
+        per_message=True  # Исправлено для правильной работы
     )
     
     # Регистрация обработчиков команд
