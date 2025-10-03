@@ -6,7 +6,6 @@ import sqlite3
 from datetime import datetime, timedelta
 import re
 import json
-from typing import Dict, List
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,11 +25,9 @@ if not BOT_TOKEN:
 # Конфигурация
 MASTER_PHONE = "+79507050964"
 MASTER_CHAT_ID = None
-WORKING_HOURS = {"start": "09:00", "end": "20:00"}
-BREAK_TIME = "13:00-14:00"  # Обеденный перерыв
 
 # Состояния разговора
-SERVICE, DATE, TIME, NAME, PHONE, CONFIRM, MASTER_MENU = range(7)
+SERVICE, DATE, TIME, NAME, PHONE, CONFIRM = range(6)
 
 # База услуг с детализацией
 SERVICES = {
@@ -48,7 +45,6 @@ def init_db():
     conn = sqlite3.connect('appointments.db')
     cursor = conn.cursor()
     
-    # Основная таблица записей
     cursor.execute('''CREATE TABLE IF NOT EXISTS appointments
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   service TEXT,
@@ -63,15 +59,6 @@ def init_db():
                   notes TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Таблица доходов
-    cursor.execute('''CREATE TABLE IF NOT EXISTS earnings
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  date TEXT,
-                  amount INTEGER,
-                  appointments_count INTEGER,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Таблица клиентов
     cursor.execute('''CREATE TABLE IF NOT EXISTS clients
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   phone TEXT UNIQUE,
@@ -81,19 +68,38 @@ def init_db():
                   total_spent INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
+    cursor.execute('''CREATE TABLE IF NOT EXISTS reviews
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  client_name TEXT,
+                  phone TEXT,
+                  rating INTEGER,
+                  text TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    conn.commit()
+    conn.close()
+
+# Обновляем информацию о клиенте
+def update_client_info(name, phone, amount_spent):
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
+    
+    today = datetime.now().strftime('%d.%m.%Y')
+    
+    cursor.execute('''INSERT OR REPLACE INTO clients 
+                    (phone, name, visits_count, last_visit, total_spent)
+                    VALUES (?, ?, 
+                    COALESCE((SELECT visits_count FROM clients WHERE phone = ?), 0) + 1,
+                    ?, 
+                    COALESCE((SELECT total_spent FROM clients WHERE phone = ?), 0) + ?)''',
+                    (phone, name, phone, today, phone, amount_spent))
+    
     conn.commit()
     conn.close()
 
 # Команда /start с улучшенным меню
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
-    # Проверяем, является ли пользователь мастером
-    if update.effective_user.phone_number and MASTER_PHONE in update.effective_user.phone_number:
-        global MASTER_CHAT_ID
-        MASTER_CHAT_ID = update.effective_user.id
-        await show_master_dashboard(update, context)
-        return
     
     welcome_text = (
         f"👋 <b>Добро пожаловать, {user.first_name}!</b>\n\n"
@@ -113,101 +119,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     keyboard = [
-        [InlineKeyboardButton("📝 Записаться", callback_data="quick_book")],
+        [InlineKeyboardButton("📝 Записаться онлайн", callback_data="quick_book")],
         [InlineKeyboardButton("💰 Услуги и цены", callback_data="show_services")],
+        [InlineKeyboardButton("⭐ Оставить отзыв", callback_data="leave_review")],
         [InlineKeyboardButton("📞 Контакты", callback_data="show_contacts")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
 
-# Панель управления для мастера
-async def show_master_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('appointments.db')
-    cursor = conn.cursor()
-    
-    # Статистика на сегодня
-    today = datetime.now().strftime('%d.%m.%Y')
-    cursor.execute("""
-        SELECT COUNT(*), COALESCE(SUM(price), 0) 
-        FROM appointments 
-        WHERE date = ? AND status = 'active'
-    """, (today,))
-    today_stats = cursor.fetchone()
-    
-    # Статистика за месяц
-    month_start = datetime.now().replace(day=1).strftime('%d.%m.%Y')
-    cursor.execute("""
-        SELECT COUNT(*), COALESCE(SUM(price), 0) 
-        FROM appointments 
-        WHERE date >= ? AND status = 'active'
-    """, (month_start,))
-    month_stats = cursor.fetchone()
-    
-    # Ближайшие записи
-    cursor.execute("""
-        SELECT time, name, service 
-        FROM appointments 
-        WHERE date = ? AND status = 'active'
-        ORDER BY time
-        LIMIT 3
-    """, (today,))
-    next_appointments = cursor.fetchall()
-    
-    conn.close()
-    
-    dashboard_text = (
-        "👑 <b>ПАНЕЛЬ УПРАВЛЕНИЯ МАСТЕРА</b>\n\n"
-        f"📊 <b>Сегодня ({today}):</b>\n"
-        f"   • Записей: {today_stats[0]}\n"
-        f"   • Ожидаемый доход: {today_stats[1]}₽\n\n"
-        f"📈 <b>За этот месяц:</b>\n"
-        f"   • Записей: {month_stats[0]}\n"
-        f"   • Доход: {month_stats[1]}₽\n\n"
-    )
-    
-    if next_appointments:
-        dashboard_text += "⏰ <b>Ближайшие записи:</b>\n"
-        for app in next_appointments:
-            dashboard_text += f"   • {app[0]} - {app[1]} ({app[2]})\n"
-    
-    keyboard = [
-        [InlineKeyboardButton("📅 Расписание на сегодня", callback_data="master_today")],
-        [InlineKeyboardButton("📋 Все записи", callback_data="master_all")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="master_stats")],
-        [InlineKeyboardButton("👥 База клиентов", callback_data="master_clients")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="master_settings")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.message:
-        await update.message.reply_text(dashboard_text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await update.callback_query.edit_message_text(dashboard_text, reply_markup=reply_markup, parse_mode='HTML')
+# Быстрая запись через кнопку
+async def quick_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await book(update, context)
 
 # Улучшенный процесс записи
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
-    row = []
-    for i, (key, service) in enumerate(SERVICES.items()):
+    for key, service in SERVICES.items():
         btn_text = f"{service['name']} - {service['price']}₽"
-        row.append(InlineKeyboardButton(btn_text, callback_data=f"service_{key}"))
-        if (i + 1) % 1 == 0:  # По одной кнопке в строке для читаемости
-            keyboard.append(row)
-            row = []
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"service_{key}")])
     
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    text = (
-        "✨ <b>Выберите услугу:</b>\n\n"
-        "💡 <i>Нажмите на услугу для подробного описания</i>"
-    )
+    text = "✨ <b>Выберите услугу:</b>"
     
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
     return SERVICE
 
-# Обработка выбора услуги с описанием
+# Обработка выбора услуги
 async def service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -220,51 +166,15 @@ async def service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['price'] = service['price']
     context.user_data['duration'] = service['duration']
     
-    # Показываем описание услуги и просим подтверждение
-    service_info = (
-        f"✨ <b>{service['name']}</b>\n\n"
-        f"💰 <b>Стоимость:</b> {service['price']}₽\n"
-        f"⏱ <b>Время:</b> {service['duration']} мин.\n\n"
-    )
-    
-    if service_key == "haircut_woman":
-        service_info += "• Консультация стилиста\n• Мытье головы\n• Стрижка\n• Укладка"
-    elif service_key == "coloring":
-        service_info += "• Консультация по цвету\n• Подбор краски\n• Окрашивание\n• Уход после процедуры"
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ Выбрать эту услугу", callback_data=f"confirm_service_{service_key}")],
-        [InlineKeyboardButton("◀️ К выбору услуг", callback_data="back_to_services")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(service_info, reply_markup=reply_markup, parse_mode='HTML')
-
-# Подтверждение выбора услуги
-async def confirm_service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    # Показываем календарь на 14 дней
+    # Показываем календарь на 7 дней
     keyboard = []
     today = datetime.now().date()
     
-    # Заголовок с месяцами
-    month_year = today.strftime('%B %Y')
-    keyboard.append([InlineKeyboardButton(f"📅 {month_year}", callback_data="current_month")])
-    
-    # Дни недели
-    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    keyboard.append([InlineKeyboardButton(day, callback_data="ignore") for day in week_days])
-    
-    # Даты
-    row = []
-    for i in range(14):
+    for i in range(7):
         date = today + timedelta(days=i)
-        if date.weekday() < 5:  # Только рабочие дни
+        if date.weekday() < 5:  # Только рабочие дни (Пн-Пт)
             date_str = date.strftime('%d.%m.%Y')
-            day_num = date.strftime('%d')
-            weekday = week_days[date.weekday()]
+            weekday = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][date.weekday()]
             
             # Проверяем доступность даты
             conn = sqlite3.connect('appointments.db')
@@ -273,299 +183,634 @@ async def confirm_service_handler(update: Update, context: ContextTypes.DEFAULT_
             appointment_count = cursor.fetchone()[0]
             conn.close()
             
-            # Максимум 10 записей в день
-            if appointment_count < 10:
-                btn_text = f"{day_num}\n{weekday}"
-                row.append(InlineKeyboardButton(btn_text, callback_data=f"date_{date_str}"))
-            else:
-                btn_text = f"❌\n{weekday}"
-                row.append(InlineKeyboardButton(btn_text, callback_data="ignore"))
-            
-            if len(row) == 7:
+            # Максимум 8 записей в день
+            if appointment_count < 8:
+                btn_text = f"{date_str} ({weekday})"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"date_{date_str}")])
+    
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_services")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"📅 <b>Выберите дату:</b>\n\n"
+        f"💇 Услуга: <b>{service['name']}</b>\n"
+        f"💰 Стоимость: <b>{service['price']}₽</b>\n"
+        f"⏱ Время: <b>{service['duration']} мин.</b>",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+    return DATE
+
+# Обработка выбора даты
+async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "back_to_services":
+        return await book(update, context)
+    
+    date_str = query.data.replace('date_', '')
+    context.user_data['date'] = date_str
+    
+    # Показываем доступное время
+    keyboard = []
+    times = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00"]
+    
+    # Проверяем занятые времена
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT time FROM appointments WHERE date = ? AND status = 'active'", (date_str,))
+    busy_times = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    
+    # Исключаем обеденное время
+    if "13:00-14:00" in context.user_data.get('service', ''):
+        times = [t for t in times if t not in ["13:00", "14:00"]]
+    
+    row = []
+    for time in times:
+        if time not in busy_times:
+            row.append(InlineKeyboardButton(time, callback_data=f"time_{time}"))
+            if len(row) == 3:
                 keyboard.append(row)
                 row = []
     
     if row:
         keyboard.append(row)
     
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-    
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_dates")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
-        f"📅 <b>Выберите дату:</b>\n\n"
-        f"💇 Услуга: <b>{context.user_data['service']}</b>\n"
-        f"💰 Стоимость: <b>{context.user_data['price']}₽</b>",
+        f"🕒 <b>Выберите время на {date_str}:</b>\n"
+        f"Услуга: <b>{context.user_data['service']}</b>",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
-    return DATE
+    return TIME
 
-# Система отзывов
-async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reviews_text = (
-        "⭐ <b>Отзывы наших клиентов:</b>\n\n"
-        "★★★★★ <b>Анна:</b>\n"
-        "<i>«Ольга - волшебница! Делает именно ту стрижку, которую хочу. Очень довольна!»</i>\n\n"
-        "★★★★★ <b>Мария:</b>\n"
-        "<i>«Хожу уже 3 года. Всегда профессионально, красиво и душевно. Рекомендую!»</i>\n\n"
-        "★★★★★ <b>Елена:</b>\n"
-        "<i>«Лучший мастер в городе! Цвет волос подобрала идеально. Спасибо!»</i>\n\n"
-        "💫 <b>Оставьте свой отзыв:</b>\n"
-        "Напишите сообщение с пометкой #отзыв"
-    )
-    
-    await update.message.reply_text(reviews_text, parse_mode='HTML')
-
-# Обработка текстовых сообщений (для отзывов)
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    if "#отзыв" in text.lower():
-        # Пересылаем отзыв мастеру
-        if MASTER_CHAT_ID:
-            review_text = (
-                "⭐ <b>НОВЫЙ ОТЗЫВ!</b>\n\n"
-                f"👤 <b>От:</b> {update.effective_user.first_name}\n"
-                f"📝 <b>Текст:</b> {text.replace('#отзыв', '').strip()}\n"
-                f"⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-            )
-            
-            try:
-                app = context.application
-                await app.bot.send_message(
-                    chat_id=MASTER_CHAT_ID,
-                    text=review_text,
-                    parse_mode='HTML'
-                )
-                await update.message.reply_text("✅ Спасибо за ваш отзыв! Он очень важен для нас. 🌟")
-            except Exception as e:
-                logger.error(f"Ошибка отправки отзыва: {e}")
-
-# Улучшенная система напоминаний
-async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Отправка напоминаний о записях"""
-    try:
-        conn = sqlite3.connect('appointments.db')
-        cursor = conn.cursor()
-        
-        # Находим записи на завтра
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%d.%m.%Y')
-        cursor.execute("""
-            SELECT phone, name, time, service 
-            FROM appointments 
-            WHERE date = ? AND status = 'active'
-        """, (tomorrow,))
-        
-        appointments = cursor.fetchall()
-        conn.close()
-        
-        for phone, name, time, service in appointments:
-            reminder_text = (
-                "🔔 <b>НАПОМИНАНИЕ О ЗАПИСИ</b>\n\n"
-                f"👋 Здравствуйте, {name}!\n"
-                f"Напоминаем, что завтра <b>{tomorrow}</b> в <b>{time}</b>\n"
-                f"у вас запись: <b>{service}</b>\n\n"
-                f"📍 <b>Адрес:</b> г. Москва, ул. Красивая, д. 15\n"
-                f"📱 <b>Телефон:</b> +79507050964\n\n"
-                "💡 <b>Пожалуйста:</b>\n"
-                "• Не опаздывайте\n"
-                "• При отмене сообщите заранее\n"
-                "• Оплата наличными или картой\n\n"
-                "Ждем вас! 💫"
-            )
-            
-            # Здесь должна быть логика отправки SMS или другого уведомления
-            # Пока просто логируем
-            logger.info(f"Напоминание для {name} ({phone}): {tomorrow} в {time}")
-            
-    except Exception as e:
-        logger.error(f"Ошибка отправки напоминаний: {e}")
-
-# Расширенная статистика для мастера
-async def show_master_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('appointments.db')
-    cursor = conn.cursor()
-    
-    # Статистика за последние 30 дней
-    month_ago = (datetime.now() - timedelta(days=30)).strftime('%d.%m.%Y')
-    
-    # Популярные услуги
-    cursor.execute("""
-        SELECT service, COUNT(*), SUM(price) 
-        FROM appointments 
-        WHERE date >= ? AND status = 'active'
-        GROUP BY service 
-        ORDER BY COUNT(*) DESC
-    """, (month_ago,))
-    popular_services = cursor.fetchall()
-    
-    # Постоянные клиенты
-    cursor.execute("""
-        SELECT name, phone, visits_count, total_spent 
-        FROM clients 
-        WHERE visits_count > 1 
-        ORDER BY visits_count DESC 
-        LIMIT 5
-    """)
-    regular_clients = cursor.fetchall()
-    
-    conn.close()
-    
-    stats_text = "📊 <b>ДЕТАЛЬНАЯ СТАТИСТИКА</b>\n\n"
-    
-    stats_text += "🔥 <b>Популярные услуги:</b>\n"
-    for service, count, revenue in popular_services:
-        stats_text += f"• {service}: {count} зап. ({revenue}₽)\n"
-    
-    stats_text += "\n👥 <b>Постоянные клиенты:</b>\n"
-    for name, phone, visits, spent in regular_clients:
-        stats_text += f"• {name}: {visits} визитов ({spent}₽)\n"
-    
-    await update.callback_query.edit_message_text(stats_text, parse_mode='HTML')
-
-# База клиентов для мастера
-async def show_clients_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('appointments.db')
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT name, phone, visits_count, total_spent, last_visit 
-        FROM clients 
-        ORDER BY visits_count DESC
-    """)
-    clients = cursor.fetchall()
-    conn.close()
-    
-    clients_text = "👥 <b>БАЗА КЛИЕНТОВ</b>\n\n"
-    
-    for name, phone, visits, spent, last_visit in clients[:10]:  # Показываем первых 10
-        clients_text += (
-            f"👤 <b>{name}</b>\n"
-            f"   📱 {phone}\n"
-            f"   🎯 Визитов: {visits}\n"
-            f"   💰 Потратил: {spent}₽\n"
-            f"   📅 Последний: {last_visit}\n\n"
-        )
-    
-    if not clients:
-        clients_text += "📭 Клиентов пока нет"
-    
-    await update.callback_query.edit_message_text(clients_text, parse_mode='HTML')
-
-# Обработчик callback queries для мастера
-async def master_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработка выбора времени
+async def time_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == "master_today":
-        await show_master_today_appointments(update, context)
-    elif query.data == "master_all":
-        await show_all_appointments(update, context)
-    elif query.data == "master_stats":
-        await show_master_stats(update, context)
-    elif query.data == "master_clients":
-        await show_clients_database(update, context)
-    elif query.data == "master_settings":
-        await show_master_settings(update, context)
-    elif query.data == "back_to_dashboard":
-        await show_master_dashboard(update, context)
+    if query.data == "back_to_dates":
+        return await date_handler(update, context)
+    
+    time_str = query.data.replace('time_', '')
+    context.user_data['time'] = time_str
+    
+    await query.edit_message_text(
+        "✏️ <b>Введите ваше имя:</b>\n\n"
+        "<i>Как к вам обращаться?</i>",
+        parse_mode='HTML'
+    )
+    return NAME
 
-# Показ записей на сегодня для мастера
-async def show_master_today_appointments(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().strftime('%d.%m.%Y')
+# Ввод имени
+async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['name'] = update.message.text
+    await update.message.reply_text(
+        "📱 <b>Введите ваш номер телефона:</b>\n\n"
+        "<i>Пример: +79123456789 или 89123456789</i>",
+        parse_mode='HTML'
+    )
+    return PHONE
+
+# Ввод телефона
+async def phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    
+    # Проверка формата телефона
+    phone_clean = phone.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    if not re.match(r'^(\+7|8|7)?\d{10}$', phone_clean):
+        await update.message.reply_text(
+            "❌ <b>Неверный формат телефона!</b>\n\n"
+            "Введите номер в формате:\n"
+            "+79123456789 или 89123456789",
+            parse_mode='HTML'
+        )
+        return PHONE
+    
+    # Нормализация телефона
+    if phone_clean.startswith('8'):
+        phone = '+7' + phone_clean[1:]
+    elif phone_clean.startswith('7'):
+        phone = '+' + phone_clean
+    elif not phone_clean.startswith('+7'):
+        phone = '+7' + phone_clean
+    
+    context.user_data['phone'] = phone
+    
+    # Подтверждение записи
+    keyboard = [
+        [InlineKeyboardButton("✅ Подтвердить запись", callback_data="confirm_yes")],
+        [InlineKeyboardButton("✏️ Изменить данные", callback_data="confirm_edit")],
+        [InlineKeyboardButton("❌ Отменить", callback_data="confirm_no")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    appointment_text = (
+        "📋 <b>ПОДТВЕРЖДЕНИЕ ЗАПИСИ</b>\n\n"
+        f"👤 <b>Имя:</b> {context.user_data['name']}\n"
+        f"📱 <b>Телефон:</b> {phone}\n"
+        f"💇 <b>Услуга:</b> {context.user_data['service']}\n"
+        f"💰 <b>Стоимость:</b> {context.user_data['price']}₽\n"
+        f"📅 <b>Дата:</b> {context.user_data['date']}\n"
+        f"🕒 <b>Время:</b> {context.user_data['time']}\n\n"
+        "<i>Все верно? Подтвердите запись</i>"
+    )
+    
+    await update.message.reply_text(appointment_text, reply_markup=reply_markup, parse_mode='HTML')
+    return CONFIRM
+
+# Подтверждение записи
+async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "confirm_no":
+        await query.edit_message_text("❌ Запись отменена")
+        return ConversationHandler.END
+    
+    if query.data == "confirm_edit":
+        await query.edit_message_text("✏️ <b>Начнем запись заново:</b>", parse_mode='HTML')
+        return await book(update, context)
+    
+    # Сохранение в базу данных
     conn = sqlite3.connect('appointments.db')
     cursor = conn.cursor()
+    cursor.execute("""INSERT INTO appointments 
+                   (service, service_key, price, duration, date, time, name, phone) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (context.user_data['service'], context.user_data['service_key'],
+                    context.user_data['price'], context.user_data['duration'],
+                    context.user_data['date'], context.user_data['time'],
+                    context.user_data['name'], context.user_data['phone']))
+    appointment_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
     
+    # Обновляем информацию о клиенте
+    update_client_info(context.user_data['name'], context.user_data['phone'], context.user_data['price'])
+    
+    # Уведомление для мастера
+    master_text = (
+        "🔔 <b>НОВАЯ ЗАПИСЬ!</b>\n\n"
+        f"📋 <b>ID:</b> #{appointment_id}\n"
+        f"👤 <b>Клиент:</b> {context.user_data['name']}\n"
+        f"📱 <b>Телефон:</b> {context.user_data['phone']}\n"
+        f"💇 <b>Услуга:</b> {context.user_data['service']}\n"
+        f"💰 <b>Стоимость:</b> {context.user_data['price']}₽\n"
+        f"📅 <b>Дата:</b> {context.user_data['date']}\n"
+        f"🕒 <b>Время:</b> {context.user_data['time']}\n\n"
+        f"⏰ Создано: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+    
+    # Отправляем уведомление мастеру
+    global MASTER_CHAT_ID
+    if MASTER_CHAT_ID:
+        try:
+            app = context.application
+            await app.bot.send_message(
+                chat_id=MASTER_CHAT_ID,
+                text=master_text,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление мастеру: {e}")
+    
+    # Подтверждение клиенту
+    success_text = (
+        "✅ <b>ЗАПИСЬ ПОДТВЕРЖДЕНА!</b>\n\n"
+        f"📋 <b>Детали записи:</b>\n"
+        f"• ID: #{appointment_id}\n"
+        f"• Услуга: {context.user_data['service']}\n"
+        f"• Стоимость: {context.user_data['price']}₽\n"
+        f"• Дата: {context.user_data['date']}\n"
+        f"• Время: {context.user_data['time']}\n"
+        f"• Имя: {context.user_data['name']}\n"
+        f"• Телефон: {context.user_data['phone']}\n\n"
+        "📍 <b>Адрес:</b> г. Москва, ул. Красивая, д. 15\n"
+        "📱 <b>Контакты:</b> +79507050964\n\n"
+        "💡 <b>Важная информация:</b>\n"
+        "• Отмена возможна за 2 часа до приема\n"
+        "• Оплата наличными или картой\n"
+        "• При отмене: /cancel_booking ID\n\n"
+        "📞 <b>Если что-то изменится:</b>\n"
+        "Позвоните по телефону выше\n\n"
+        "Ждем вас! 💫"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("⭐ Оставить отзыв", callback_data="leave_review")],
+        [InlineKeyboardButton("📋 Мои записи", callback_data="my_bookings_list")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(success_text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    # Сохраняем chat_id мастера
+    if context.user_data['phone'] == MASTER_PHONE and not MASTER_CHAT_ID:
+        MASTER_CHAT_ID = update.effective_user.id
+        logger.info(f"Master chat_id saved: {MASTER_CHAT_ID}")
+    
+    return ConversationHandler.END
+
+# Показ услуг
+async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    services_text = "✨ <b>НАШИ УСЛУГИ И ЦЕНЫ</b>\n\n"
+    
+    for service in SERVICES.values():
+        services_text += f"• {service['name']} - {service['price']}₽\n"
+        services_text += f"  ⏱ {service['duration']} мин.\n\n"
+    
+    services_text += (
+        "🕒 <b>Время работы:</b>\n"
+        "• Пн-Пт: 9:00 - 20:00\n"
+        "• Сб-Вс: 10:00 - 18:00\n\n"
+        "🍽 <b>Обеденный перерыв:</b> 13:00-14:00\n\n"
+        "🎁 <b>Акция:</b> 5-я стрижка со скидкой 20%!"
+    )
+    
+    keyboard = [[InlineKeyboardButton("📝 Записаться", callback_data="quick_book")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(services_text, reply_markup=reply_markup, parse_mode='HTML')
+
+# Контакты
+async def show_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contacts_text = (
+        "📞 <b>КОНТАКТЫ САЛОНА</b>\n\n"
+        "👩‍💼 <b>Мастер:</b> Ольга Карре\n"
+        f"📱 <b>Телефон:</b> {MASTER_PHONE}\n"
+        "📍 <b>Адрес:</b> г. Москва, ул. Красивая, д. 15\n\n"
+        "🕒 <b>Время работы:</b>\n"
+        "• Пн-Пт: 9:00 - 20:00\n"
+        "• Сб-Вс: 10:00 - 18:00\n\n"
+        "🚇 <b>Как добраться:</b>\n"
+        "Метро 'Красивая', 5 минут пешком\n"
+        "Рядом бесплатная парковка"
+    )
+    
+    await update.message.reply_text(contacts_text, parse_mode='HTML')
+
+# Система отзывов
+async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT client_name, rating, text FROM reviews ORDER BY created_at DESC LIMIT 5")
+    reviews = cursor.fetchall()
+    conn.close()
+    
+    if reviews:
+        reviews_text = "⭐ <b>ПОСЛЕДНИЕ ОТЗЫВЫ:</b>\n\n"
+        for name, rating, text in reviews:
+            stars = "★" * rating + "☆" * (5 - rating)
+            reviews_text += f"{stars} <b>{name}:</b>\n<i>«{text}»</i>\n\n"
+    else:
+        reviews_text = (
+            "⭐ <b>ОТЗЫВЫ КЛИЕНТОВ</b>\n\n"
+            "Пока нет отзывов. Будьте первым!\n\n"
+        )
+    
+    reviews_text += "💫 <b>Оставить отзыв:</b>\nНажмите кнопку ниже"
+    
+    keyboard = [[InlineKeyboardButton("⭐ Оставить отзыв", callback_data="leave_review")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(reviews_text, reply_markup=reply_markup, parse_mode='HTML')
+
+# Оставить отзыв
+async def leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text(
+            "⭐ <b>ОСТАВЬТЕ ОТЗЫВ</b>\n\n"
+            "Пожалуйста, отправьте ваш отзыв в формате:\n\n"
+            "<code>Имя\nОценка (1-5)\nТекст отзыва</code>\n\n"
+            "<i>Пример:</i>\n"
+            "<code>Анна\n5\nОльга - волшебница! Стрижка идеальная!</code>",
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            "⭐ <b>ОСТАВЬТЕ ОТЗЫВ</b>\n\n"
+            "Пожалуйста, отправьте ваш отзыв в формате:\n\n"
+            "<code>Имя\nОценка (1-5)\nТекст отзыва</code>",
+            parse_mode='HTML'
+        )
+
+# Обработка отзывов
+async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    lines = text.split('\n')
+    
+    if len(lines) < 3:
+        await update.message.reply_text(
+            "❌ <b>Неверный формат отзыва!</b>\n\n"
+            "Пожалуйста, используйте формат:\n"
+            "<code>Имя\nОценка (1-5)\nТекст отзыва</code>",
+            parse_mode='HTML'
+        )
+        return
+    
+    name = lines[0].strip()
+    try:
+        rating = int(lines[1].strip())
+        if rating < 1 or rating > 5:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Оценка должна быть числом от 1 до 5")
+        return
+    
+    review_text = '\n'.join(lines[2:]).strip()
+    
+    # Сохраняем отзыв
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO reviews (client_name, rating, text) VALUES (?, ?, ?)",
+                   (name, rating, review_text))
+    conn.commit()
+    conn.close()
+    
+    # Уведомляем мастера
+    if MASTER_CHAT_ID:
+        review_notification = (
+            "⭐ <b>НОВЫЙ ОТЗЫВ!</b>\n\n"
+            f"👤 <b>Имя:</b> {name}\n"
+            f"⭐ <b>Оценка:</b> {'★' * rating}{'☆' * (5 - rating)}\n"
+            f"📝 <b>Текст:</b> {review_text}\n"
+            f"⏰ <b>Время:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        try:
+            app = context.application
+            await app.bot.send_message(
+                chat_id=MASTER_CHAT_ID,
+                text=review_notification,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки отзыва мастеру: {e}")
+    
+    await update.message.reply_text(
+        "✅ <b>Спасибо за ваш отзыв!</b>\n\n"
+        "Мы очень ценим ваше мнение! 🌟",
+        parse_mode='HTML'
+    )
+
+# Просмотр записей клиента
+async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.replace('/my_bookings', '').strip()
+    
+    if not user_input:
+        await update.message.reply_text(
+            "📋 <b>ПРОСМОТР ЗАПИСЕЙ</b>\n\n"
+            "Введите номер телефона:\n"
+            "<code>/my_bookings +79123456789</code>\n\n"
+            "👑 <b>Для мастера:</b>\n"
+            "<code>/master</code> - все записи\n"
+            "<code>/master_today</code> - на сегодня",
+            parse_mode='HTML'
+        )
+        return
+    
+    # Нормализация телефона
+    phone = user_input
+    phone_clean = phone.replace(' ', '').replace('-', '')
+    if phone_clean.startswith('8'):
+        phone = '+7' + phone_clean[1:]
+    elif phone_clean.startswith('7'):
+        phone = '+' + phone_clean
+    elif not phone_clean.startswith('+7'):
+        phone = '+7' + phone_clean
+    
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
     cursor.execute("""
-        SELECT id, time, name, phone, service, price, notes 
+        SELECT id, service, date, time, status, price
         FROM appointments 
-        WHERE date = ? AND status = 'active'
-        ORDER BY time
-    """, (today,))
+        WHERE phone = ? 
+        ORDER BY date DESC, time DESC
+        LIMIT 10
+    """, (phone,))
     appointments = cursor.fetchall()
     conn.close()
     
     if not appointments:
-        text = f"📭 <b>На сегодня ({today}) записей нет</b>"
-    else:
-        text = f"📅 <b>РАСПИСАНИЕ НА СЕГОДНЯ ({today})</b>\n\n"
-        total_income = 0
+        await update.message.reply_text("❌ Записей не найдено. Проверьте номер телефона.")
+        return
+    
+    text = "📋 <b>ВАШИ ЗАПИСИ:</b>\n\n"
+    for app in appointments:
+        status_icon = "✅" if app[4] == 'active' else "❌"
+        status_text = "Активна" if app[4] == 'active' else "Отменена"
+        text += (f"{status_icon} <b>ID:</b> #{app[0]}\n"
+                f"   💇 <b>Услуга:</b> {app[1]}\n"
+                f"   💰 <b>Стоимость:</b> {app[5]}₽\n"
+                f"   📅 <b>Дата:</b> {app[2]}\n"
+                f"   🕒 <b>Время:</b> {app[3]}\n"
+                f"   📊 <b>Статус:</b> {status_text}\n\n")
+    
+    text += "💡 <b>Для отмены записи:</b>\n<code>/cancel_booking ID_записи</code>"
+    
+    await update.message.reply_text(text, parse_mode='HTML')
+
+# Команды для мастера
+async def master_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.replace('/master', '').replace('/master_today', '').strip()
+    
+    # Простая проверка мастера по номеру телефона
+    if user_input != MASTER_PHONE:
+        await update.message.reply_text("❌ Эта команда только для мастера.")
+        return
+    
+    global MASTER_CHAT_ID
+    if not MASTER_CHAT_ID:
+        MASTER_CHAT_ID = update.effective_user.id
+        logger.info(f"Master chat_id set: {MASTER_CHAT_ID}")
+    
+    conn = sqlite3.connect('appointments.db')
+    cursor = conn.cursor()
+    
+    if 'today' in update.message.text:
+        # Записи на сегодня
+        today = datetime.now().strftime('%d.%m.%Y')
+        cursor.execute("""
+            SELECT id, service, time, name, phone, price
+            FROM appointments 
+            WHERE date = ? AND status = 'active'
+            ORDER BY time
+        """, (today,))
+        appointments = cursor.fetchall()
         
+        if not appointments:
+            await update.message.reply_text(f"📭 На сегодня ({today}) записей нет.")
+            conn.close()
+            return
+        
+        text = f"📅 <b>ЗАПИСИ НА СЕГОДНЯ ({today}):</b>\n\n"
+        total = 0
         for app in appointments:
-            total_income += app[5]
-            notes = f"\n   📝 <i>{app[6]}</i>" if app[6] else ""
-            text += (
-                f"🕒 <b>{app[1]}</b>\n"
-                f"   👤 {app[2]}\n"
-                f"   📱 {app[3]}\n"
-                f"   💇 {app[4]}\n"
-                f"   💰 {app[5]}₽{notes}\n"
-                f"   🆔 #{app[0]}\n\n"
-            )
+            total += app[5]
+            text += (f"🕒 <b>{app[2]}</b>\n"
+                    f"   👤 {app[3]}\n"
+                    f"   📱 {app[4]}\n"
+                    f"   💇 {app[1]}\n"
+                    f"   💰 {app[5]}₽\n"
+                    f"   🆔 #{app[0]}\n\n")
         
-        text += f"💰 <b>Ожидаемый доход: {total_income}₽</b>"
+        text += f"💰 <b>Ожидаемый доход: {total}₽</b>"
+        
+    else:
+        # Все активные записи
+        cursor.execute("""
+            SELECT id, service, date, time, name, phone, price
+            FROM appointments 
+            WHERE status = 'active' AND date >= date('now')
+            ORDER BY date, time
+        """)
+        appointments = cursor.fetchall()
+        
+        if not appointments:
+            await update.message.reply_text("📭 Активных записей нет.")
+            conn.close()
+            return
+        
+        text = "📋 <b>ВСЕ АКТИВНЫЕ ЗАПИСИ:</b>\n\n"
+        current_date = None
+        for app in appointments:
+            if app[3] != current_date:
+                current_date = app[3]
+                weekday = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][datetime.strptime(current_date, '%d.%m.%Y').weekday()]
+                text += f"\n📅 <b>{current_date} ({weekday})</b>\n"
+            
+            text += (f"   🕒 <b>{app[3]}</b> - {app[4]}\n"
+                    f"      📱 {app[5]}\n"
+                    f"      💇 {app[1]}\n"
+                    f"      💰 {app[6]}₽\n"
+                    f"      🆔 #{app[0]}\n")
     
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_dashboard")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    conn.close()
+    await update.message.reply_text(text, parse_mode='HTML')
 
-# Настройки мастера
-async def show_master_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings_text = (
-        "⚙️ <b>НАСТРОЙКИ МАСТЕРА</b>\n\n"
-        "🔔 <b>Уведомления:</b> Включены\n"
-        "📱 <b>Телефон:</b> +79507050964\n"
-        "🕒 <b>График работы:</b> 9:00-20:00\n"
-        "🍽 <b>Перерыв:</b> 13:00-14:00\n\n"
-        "<i>Для изменения настроек обратитесь к администратору</i>"
-    )
+# Отмена записи
+async def cancel_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
     
-    keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_dashboard")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    if not args:
+        await update.message.reply_text(
+            "❌ <b>Укажите ID записи для отмены:</b>\n"
+            "<code>/cancel_booking 123</code>\n\n"
+            "📋 <b>Чтобы узнать ID записи:</b>\n"
+            "<code>/my_bookings +79123456789</code>",
+            parse_mode='HTML'
+        )
+        return
     
-    await update.callback_query.edit_message_text(settings_text, reply_markup=reply_markup, parse_mode='HTML')
+    try:
+        booking_id = int(args[0])
+        conn = sqlite3.connect('appointments.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM appointments WHERE id = ?", (booking_id,))
+        appointment = cursor.fetchone()
+        
+        if not appointment:
+            await update.message.reply_text("❌ Запись не найдена.")
+            conn.close()
+            return
+        
+        cursor.execute("UPDATE appointments SET status = 'cancelled' WHERE id = ?", (booking_id,))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ <b>Запись отменена</b>\n\n"
+            f"📋 ID: #{booking_id}\n"
+            f"💇 Услуга: {appointment[1]}\n"
+            f"📅 Дата: {appointment[5]}\n"
+            f"🕒 Время: {appointment[6]}\n"
+            f"👤 Клиент: {appointment[7]}",
+            parse_mode='HTML'
+        )
+        
+    except (ValueError, sqlite3.Error) as e:
+        await update.message.reply_text("❌ Ошибка при отмене записи. Проверьте ID.")
 
-# Остальные функции (date_handler, time_handler, name, phone, confirm_handler, etc.)
-# остаются аналогичными предыдущей версии, но с улучшениями...
+# Отмена диалога
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        await update.message.reply_text('❌ Запись отменена', reply_markup=ReplyKeyboardRemove())
+    else:
+        await update.callback_query.edit_message_text('❌ Запись отменена')
+    return ConversationHandler.END
+
+# Обработка ошибок
+async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
 
 def main():
+    # Инициализация базы данных
     init_db()
     
+    # Создание приложения
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем job для напоминаний (каждый день в 19:00)
-    job_queue = application.job_queue
-    job_queue.run_daily(send_reminders, time=datetime.strptime("19:00", "%H:%M").time())
-    
-    # Обработчики для мастера
-    application.add_handler(CallbackQueryHandler(master_callback_handler, pattern="^master_"))
-    application.add_handler(CallbackQueryHandler(master_callback_handler, pattern="^back_to_dashboard"))
-    
-    # Обработчик текстовых сообщений для отзывов
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
-    # Остальные обработчики...
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reviews", show_reviews))
-    application.add_handler(CommandHandler("master", show_master_dashboard))
-    
-    # ConversationHandler для записи...
+    # Обработчик диалога записи
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('book', book)],
+        entry_points=[
+            CommandHandler('book', book),
+            CallbackQueryHandler(quick_book, pattern='^quick_book$')
+        ],
         states={
             SERVICE: [
                 CallbackQueryHandler(service_handler, pattern='^service_'),
-                CallbackQueryHandler(confirm_service_handler, pattern='^confirm_service_')
+                CallbackQueryHandler(book, pattern='^back_to_services$')
             ],
-            DATE: [CallbackQueryHandler(date_handler, pattern='^(date_|cancel|ignore|current_month)$')],
-            # ... остальные states
+            DATE: [
+                CallbackQueryHandler(date_handler, pattern='^date_'),
+                CallbackQueryHandler(book, pattern='^back_to_services$')
+            ],
+            TIME: [
+                CallbackQueryHandler(time_handler, pattern='^time_'),
+                CallbackQueryHandler(date_handler, pattern='^back_to_dates$')
+            ],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone)],
+            CONFIRM: [CallbackQueryHandler(confirm_handler, pattern='^confirm_')]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CallbackQueryHandler(cancel, pattern='^cancel$')
+        ]
     )
-    application.add_handler(conv_handler)
     
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("services", show_services))
+    application.add_handler(CommandHandler("contacts", show_contacts))
+    application.add_handler(CommandHandler("reviews", show_reviews))
+    application.add_handler(CommandHandler("my_bookings", my_bookings))
+    application.add_handler(CommandHandler("master", master_command))
+    application.add_handler(CommandHandler("master_today", master_command))
+    application.add_handler(CommandHandler("cancel_booking", cancel_booking))
+    
+    # Обработчики callback queries
+    application.add_handler(CallbackQueryHandler(show_services, pattern='^show_services$'))
+    application.add_handler(CallbackQueryHandler(show_contacts, pattern='^show_contacts$'))
+    application.add_handler(CallbackQueryHandler(leave_review, pattern='^leave_review$'))
+    application.add_handler(CallbackQueryHandler(my_bookings, pattern='^my_bookings_list$'))
+    
+    # Обработчик отзывов
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_review))
+    
+    application.add_handler(conv_handler)
+    application.add_error_handler(error)
+    
+    # Запуск бота
     application.run_polling()
 
 if __name__ == '__main__':
