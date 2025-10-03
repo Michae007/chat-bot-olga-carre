@@ -5,7 +5,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import sqlite3
 from datetime import datetime, timedelta
 import re
-import json
 
 # Настройка логирования
 logging.basicConfig(
@@ -29,14 +28,12 @@ MASTER_CHAT_ID = None
 # Состояния разговора
 SERVICE, DATE, TIME, NAME, PHONE, CONFIRM = range(6)
 
-# База услуг с детализацией
+# База услуг с детализацией (убрал укладку и лечение волос)
 SERVICES = {
     "haircut_woman": {"name": "💇 Женская стрижка", "price": 1500, "duration": 60},
     "haircut_man": {"name": "💇‍♂️ Мужская стрижка", "price": 800, "duration": 45},
     "haircut_child": {"name": "👧 Детская стрижка", "price": 700, "duration": 40},
     "coloring": {"name": "🎨 Окрашивание", "price": 2500, "duration": 120},
-    "styling": {"name": "💫 Укладка", "price": 1000, "duration": 30},
-    "haircare": {"name": "🧖 Лечение волос", "price": 1200, "duration": 45},
     "complex": {"name": "✨ Комплекс (стрижка+укладка)", "price": 2200, "duration": 90}
 }
 
@@ -97,7 +94,7 @@ def update_client_info(name, phone, amount_spent):
     conn.commit()
     conn.close()
 
-# Команда /start с улучшенным меню
+# Команда /start с улучшенным меню (убрал акции)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -107,15 +104,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💫 <b>Мы предлагаем:</b>\n"
         "• Профессиональные стрижки\n"
         "• Модное окрашивание\n"
-        "• Уход за волосами\n"
         "• Стильные укладки\n\n"
         "📋 <b>Основные команды:</b>\n"
         "• /book - 📝 Новая запись\n"
         "• /my_bookings - 📋 Мои записи\n"
         "• /services - 💰 Услуги и цены\n"
         "• /reviews - ⭐ Отзывы\n"
-        "• /contacts - 📞 Контакты\n\n"
-        "🎁 <b>Акция:</b> 5-я стрижка со скидкой 20%!"
+        "• /contacts - 📞 Контакты"
     )
     
     keyboard = [
@@ -128,13 +123,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='HTML')
 
-# Быстрая запись через кнопку
-async def quick_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработка callback queries для главного меню
+async def handle_main_menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await book(update, context)
+    
+    if query.data == "quick_book":
+        await book_callback(update, context)
+    elif query.data == "show_services":
+        await show_services_callback(update, context)
+    elif query.data == "show_contacts":
+        await show_contacts_callback(update, context)
+    elif query.data == "leave_review":
+        await leave_review_callback(update, context)
 
-# Улучшенный процесс записи
+# Быстрая запись через кнопку
+async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = []
+    for key, service in SERVICES.items():
+        btn_text = f"{service['name']} - {service['price']}₽"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"service_{key}")])
+    
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = "✨ <b>Выберите услугу:</b>"
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+
+# Улучшенный процесс записи через команду
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     for key, service in SERVICES.items():
@@ -146,11 +166,7 @@ async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = "✨ <b>Выберите услугу:</b>"
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
     return SERVICE
 
 # Обработка выбора услуги
@@ -207,14 +223,14 @@ async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == "back_to_services":
-        return await book(update, context)
+        return await book_callback(update, context)
     
     date_str = query.data.replace('date_', '')
     context.user_data['date'] = date_str
     
     # Показываем доступное время
     keyboard = []
-    times = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00"]
+    times = ["09:00", "10:00", "11:00", "12:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00"]
     
     # Проверяем занятые времена
     conn = sqlite3.connect('appointments.db')
@@ -222,10 +238,6 @@ async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT time FROM appointments WHERE date = ? AND status = 'active'", (date_str,))
     busy_times = [row[0] for row in cursor.fetchall()]
     conn.close()
-    
-    # Исключаем обеденное время
-    if "13:00-14:00" in context.user_data.get('service', ''):
-        times = [t for t in times if t not in ["13:00", "14:00"]]
     
     row = []
     for time in times:
@@ -335,7 +347,7 @@ async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "confirm_edit":
         await query.edit_message_text("✏️ <b>Начнем запись заново:</b>", parse_mode='HTML')
-        return await book(update, context)
+        return await book_callback(update, context)
     
     # Сохранение в базу данных
     conn = sqlite3.connect('appointments.db')
@@ -403,7 +415,7 @@ async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     keyboard = [
-        [InlineKeyboardButton("⭐ Оставить отзыв", callback_data="leave_review")],
+        [InlineKeyboardButton("⭐ Оставить отзыв", callback_data="leave_review_after_booking")],
         [InlineKeyboardButton("📋 Мои записи", callback_data="my_bookings_list")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -417,7 +429,30 @@ async def confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-# Показ услуг
+# Показ услуг через callback (убрал акции)
+async def show_services_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    services_text = "✨ <b>НАШИ УСЛУГИ И ЦЕНЫ</b>\n\n"
+    
+    for service in SERVICES.values():
+        services_text += f"• {service['name']} - {service['price']}₽\n"
+        services_text += f"  ⏱ {service['duration']} мин.\n\n"
+    
+    services_text += (
+        "🕒 <b>Время работы:</b>\n"
+        "• Пн-Пт: 9:00 - 20:00\n"
+        "• Сб-Вс: 10:00 - 18:00\n\n"
+        "🍽 <b>Обеденный перерыв:</b> 13:00-14:00"
+    )
+    
+    keyboard = [[InlineKeyboardButton("📝 Записаться", callback_data="quick_book")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(services_text, reply_markup=reply_markup, parse_mode='HTML')
+
+# Показ услуг через команду (убрал акции)
 async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     services_text = "✨ <b>НАШИ УСЛУГИ И ЦЕНЫ</b>\n\n"
     
@@ -429,8 +464,7 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🕒 <b>Время работы:</b>\n"
         "• Пн-Пт: 9:00 - 20:00\n"
         "• Сб-Вс: 10:00 - 18:00\n\n"
-        "🍽 <b>Обеденный перерыв:</b> 13:00-14:00\n\n"
-        "🎁 <b>Акция:</b> 5-я стрижка со скидкой 20%!"
+        "🍽 <b>Обеденный перерыв:</b> 13:00-14:00"
     )
     
     keyboard = [[InlineKeyboardButton("📝 Записаться", callback_data="quick_book")]]
@@ -438,7 +472,27 @@ async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(services_text, reply_markup=reply_markup, parse_mode='HTML')
 
-# Контакты
+# Контакты через callback
+async def show_contacts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    contacts_text = (
+        "📞 <b>КОНТАКТЫ САЛОНА</b>\n\n"
+        "👩‍💼 <b>Мастер:</b> Ольга Карре\n"
+        f"📱 <b>Телефон:</b> {MASTER_PHONE}\n"
+        "📍 <b>Адрес:</b> г. Москва, ул. Красивая, д. 15\n\n"
+        "🕒 <b>Время работы:</b>\n"
+        "• Пн-Пт: 9:00 - 20:00\n"
+        "• Сб-Вс: 10:00 - 18:00\n\n"
+        "🚇 <b>Как добраться:</b>\n"
+        "Метро 'Красивая', 5 минут пешком\n"
+        "Рядом бесплатная парковка"
+    )
+    
+    await query.edit_message_text(contacts_text, parse_mode='HTML')
+
+# Контакты через команду
 async def show_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contacts_text = (
         "📞 <b>КОНТАКТЫ САЛОНА</b>\n\n"
@@ -455,7 +509,21 @@ async def show_contacts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(contacts_text, parse_mode='HTML')
 
-# Система отзывов
+# Оставить отзыв через callback
+async def leave_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "⭐ <b>ОСТАВЬТЕ ОТЗЫВ</b>\n\n"
+        "Пожалуйста, отправьте ваш отзыв в формате:\n\n"
+        "<code>Имя\nОценка (1-5)\nТекст отзыва</code>\n\n"
+        "<i>Пример:</i>\n"
+        "<code>Анна\n5\nОльга - волшебница! Стрижка идеальная!</code>",
+        parse_mode='HTML'
+    )
+
+# Система отзывов через команду
 async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('appointments.db')
     cursor = conn.cursor()
@@ -480,27 +548,6 @@ async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(reviews_text, reply_markup=reply_markup, parse_mode='HTML')
-
-# Оставить отзыв
-async def leave_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query:
-        await query.answer()
-        await query.edit_message_text(
-            "⭐ <b>ОСТАВЬТЕ ОТЗЫВ</b>\n\n"
-            "Пожалуйста, отправьте ваш отзыв в формате:\n\n"
-            "<code>Имя\nОценка (1-5)\nТекст отзыва</code>\n\n"
-            "<i>Пример:</i>\n"
-            "<code>Анна\n5\nОльга - волшебница! Стрижка идеальная!</code>",
-            parse_mode='HTML'
-        )
-    else:
-        await update.message.reply_text(
-            "⭐ <b>ОСТАВЬТЕ ОТЗЫВ</b>\n\n"
-            "Пожалуйста, отправьте ваш отзыв в формате:\n\n"
-            "<code>Имя\nОценка (1-5)\nТекст отзыва</code>",
-            parse_mode='HTML'
-        )
 
 # Обработка отзывов
 async def handle_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -571,8 +618,8 @@ async def my_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Введите номер телефона:\n"
             "<code>/my_bookings +79123456789</code>\n\n"
             "👑 <b>Для мастера:</b>\n"
-            "<code>/master</code> - все записи\n"
-            "<code>/master_today</code> - на сегодня",
+            "<code>/master +79507050964</code> - все записи\n"
+            "<code>/master_today +79507050964</code> - на сегодня",
             parse_mode='HTML'
         )
         return
@@ -745,7 +792,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text('❌ Запись отменена', reply_markup=ReplyKeyboardRemove())
     else:
-        await update.callback_query.edit_message_text('❌ Запись отменена')
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text('❌ Запись отменена')
     return ConversationHandler.END
 
 # Обработка ошибок
@@ -763,16 +812,15 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('book', book),
-            CallbackQueryHandler(quick_book, pattern='^quick_book$')
+            CallbackQueryHandler(book_callback, pattern='^quick_book$')
         ],
         states={
             SERVICE: [
                 CallbackQueryHandler(service_handler, pattern='^service_'),
-                CallbackQueryHandler(book, pattern='^back_to_services$')
             ],
             DATE: [
                 CallbackQueryHandler(date_handler, pattern='^date_'),
-                CallbackQueryHandler(book, pattern='^back_to_services$')
+                CallbackQueryHandler(book_callback, pattern='^back_to_services$')
             ],
             TIME: [
                 CallbackQueryHandler(time_handler, pattern='^time_'),
@@ -785,10 +833,11 @@ def main():
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(cancel, pattern='^cancel$')
-        ]
+        ],
+        per_message=False
     )
     
-    # Регистрация обработчиков
+    # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("services", show_services))
     application.add_handler(CommandHandler("contacts", show_contacts))
@@ -798,19 +847,18 @@ def main():
     application.add_handler(CommandHandler("master_today", master_command))
     application.add_handler(CommandHandler("cancel_booking", cancel_booking))
     
-    # Обработчики callback queries
-    application.add_handler(CallbackQueryHandler(show_services, pattern='^show_services$'))
-    application.add_handler(CallbackQueryHandler(show_contacts, pattern='^show_contacts$'))
-    application.add_handler(CallbackQueryHandler(leave_review, pattern='^leave_review$'))
-    application.add_handler(CallbackQueryHandler(my_bookings, pattern='^my_bookings_list$'))
+    # Обработчики callback queries для главного меню
+    application.add_handler(CallbackQueryHandler(handle_main_menu_callbacks, pattern='^(show_services|show_contacts|leave_review)$'))
     
     # Обработчик отзывов
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_review))
     
+    # ConversationHandler должен быть добавлен последним
     application.add_handler(conv_handler)
     application.add_error_handler(error)
     
     # Запуск бота
+    logger.info("Бот запущен и готов к работе!")
     application.run_polling()
 
 if __name__ == '__main__':
